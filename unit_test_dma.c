@@ -8,8 +8,8 @@
 
 /* helper to run firmware_start_dma in separate thread */
 struct thread_args {
-    uint64_t src;
-    uint64_t dst;
+    uint32_t src;
+    uint32_t dst;
     uint32_t size;
     int result;
 };

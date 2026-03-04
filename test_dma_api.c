@@ -13,11 +13,6 @@
 
 static void reset_dma_emulation()
 {
-    /* ================= Hardware Registers ================= */
-    /*Generally DMA/S-G DMA operation is discriptor based but for considering this test using Direct mode*/
-    /*Note: In actual HW platform register written like this example: DMA_HW_SRC_REG = (DMA_BASE_ADDRESS + offset)*/
-    /* using pointer to access that address and write values in register */
-
     dma_regs.DMA_HW_SRC_REG = 0;
     dma_regs.DMA_HW_DST_REG = 0;
     dma_regs.DMA_HW_SIZE_REG = 0;

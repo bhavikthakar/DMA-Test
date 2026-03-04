@@ -25,7 +25,7 @@ static void format_timestamp(char *buffer, size_t len)
     struct tm tm_info;
 
     clock_gettime(CLOCK_REALTIME, &ts);
-    // This is time consuming my point of view, PTP/NTP f
+    // This code is CPU consuming but in embedded platform, we can take PTP register value.
     localtime_r(&ts.tv_sec, &tm_info);
 
     strftime(buffer, len, "%Y-%m-%d %H:%M:%S", &tm_info);
@@ -114,7 +114,7 @@ void fw_log_init(void)
 
 void fw_log_event(log_event_t *event)
 {
-    /* needed in multithreaded enviroment of need fifo based synchronous buffer*/
+    /* Multiple thread may access log event so synchronisation needed*/
     pthread_mutex_lock(&log_mutex);
 
     log_queue[head] = *event;

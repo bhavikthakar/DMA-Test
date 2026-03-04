@@ -11,6 +11,7 @@
 /*Generally DMA/S-G DMA operation is discriptor based but for considering this test using Direct mode*/
 /*Note: In actual HW platform register written like this example: DMA_HW_SRC_REG = (DMA_BASE_ADDRESS + offset)*/
 /* using pointer to access that address and write values in register */
+/*Setting register default value for emmulation purpose only*/
 dma_register dma_regs =
 {
     .DMA_HW_SRC_REG = 0,
@@ -44,11 +45,6 @@ static uint64_t error_count = 0;
 static struct timespec start_time;
 #endif
 
-/*Last Successful data transfer datail*/
-static uint64_t last_success_src = 0;
-static uint64_t last_success_dst = 0;
-static uint32_t last_success_size = 0;
-static char last_success_time[64] = {0};
 
 /*Note: Actual platform need cache flush before DMA transfer on embedded platform*/
 static void dma_cache_flush(void *addr, size_t size)
@@ -144,8 +140,7 @@ static int wait_for_completion(void)
         event.success_count = success_count;
         event.error_count = error_count;
         //We can take PTP register value and store in log event on actual platform
-        //FW logging works on separate thread and it will not affect to actual performance of DMA transfer, 
-        //so we can directly call fw_log_event() here without any performance concern.
+        //FW logging works on separate thread and it will not affect to actual performance of DMA transfer
         fw_log_event(&event);
         return DMA_ERR_HW_FAILURE;
     }
