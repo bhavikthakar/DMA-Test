@@ -6,6 +6,16 @@
 #include <unistd.h> /* for usleep */
 #include "dma.h"
 
+dma_register dma_regs =
+{
+    .DMA_HW_SRC_REG = 0,
+    .DMA_HW_DST_REG = 0,
+    .DMA_HW_SIZE_REG = 0,
+    .DMA_HW_CMD_REG = 0,
+    .DMA_HW_STATUS = DMA_IDLE,
+    .DMA_HW_INTERRUPT_STATUS_REG = 0
+};
+
 /* helper to run firmware_start_dma in separate thread */
 struct thread_args {
     uint32_t src;

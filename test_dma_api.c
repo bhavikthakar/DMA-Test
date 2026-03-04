@@ -4,12 +4,21 @@
 #include <string.h>
 #include "dma.h"
 
-
 /* ================= Hardware Registers ================= */
 /*Generally DMA/S-G DMA operation is discriptor based but for considering this test using Direct mode*/
 /*Note: In actual HW platform register written like this example: DMA_HW_SRC_REG = (DMA_BASE_ADDRESS + offset)*/
 /* using pointer to access that address and write values in register */
-/* dma_regs is defined in dma_api.c and will be linked from there */
+/*Setting register default value for emmulation purpose only*/
+dma_register dma_regs =
+{
+    .DMA_HW_SRC_REG = 0,
+    .DMA_HW_DST_REG = 0,
+    .DMA_HW_SIZE_REG = 0,
+    .DMA_HW_CMD_REG = 0,
+    .DMA_HW_STATUS = DMA_IDLE,
+    .DMA_HW_INTERRUPT_STATUS_REG = 0
+};
+
 
 static void reset_dma_emulation()
 {

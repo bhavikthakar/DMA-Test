@@ -130,3 +130,9 @@ Total Successful Transfers : 8
 Total Error Count          : 2
 ==================================================
 
+[2026-03-04 19:41:18.590099] DMA SUCCESS
+Transfer Sequence : 1
+SRC  : 0x0000000000001000
+DST  : 0x0000000000002000
+SIZE : 1024 bytes
+
