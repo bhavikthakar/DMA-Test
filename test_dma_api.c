@@ -11,8 +11,10 @@
 /*Setting register default value for emmulation purpose only*/
 dma_register dma_regs =
 {
-    .DMA_HW_SRC_REG = 0,
-    .DMA_HW_DST_REG = 0,
+    .DMA_HW_SRC_REG_LOWER = 0,
+    .DMA_HW_SRC_REG_UPPER = 0,
+    .DMA_HW_DST_REG_LOWER = 0,
+    .DMA_HW_DST_REG_UPPER = 0,
     .DMA_HW_SIZE_REG = 0,
     .DMA_HW_CMD_REG = 0,
     .DMA_HW_STATUS = DMA_IDLE,
@@ -20,14 +22,35 @@ dma_register dma_regs =
 };
 
 
+/* Scatter-Gather DMA Register instance */
+sg_dma_register sg_dma_regs =
+{
+    .SG_CURRENT_DESC_LOWER = 0,
+    .SG_CURRENT_DESC_UPPER = 0,
+    .SG_TAIL_DESC_LOWER = 0,
+    .SG_TAIL_DESC_UPPER = 0,
+    .SG_CMD_REG = 0,
+    .SG_STATUS = DMA_IDLE,
+};
+
+
 static void reset_dma_emulation()
 {
-    dma_regs.DMA_HW_SRC_REG = 0;
-    dma_regs.DMA_HW_DST_REG = 0;
+    dma_regs.DMA_HW_SRC_REG_LOWER = 0;
+    dma_regs.DMA_HW_SRC_REG_UPPER = 0;
+    dma_regs.DMA_HW_DST_REG_LOWER = 0;
+    dma_regs.DMA_HW_DST_REG_UPPER = 0;
     dma_regs.DMA_HW_SIZE_REG = 0;
     dma_regs.DMA_HW_CMD_REG = 0;
     dma_regs.DMA_HW_STATUS = DMA_IDLE;
     dma_regs.DMA_HW_INTERRUPT_STATUS_REG = 0;
+
+    sg_dma_regs.SG_CURRENT_DESC_LOWER = 0;
+    sg_dma_regs.SG_CURRENT_DESC_UPPER = 0;
+    sg_dma_regs.SG_TAIL_DESC_LOWER = 0;
+    sg_dma_regs.SG_TAIL_DESC_UPPER = 0;
+    sg_dma_regs.SG_CMD_REG = 0;
+    sg_dma_regs.SG_STATUS = DMA_IDLE;
 }
 
 /* ===================================================== */

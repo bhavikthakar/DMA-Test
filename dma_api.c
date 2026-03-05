@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <time.h>
 #include <string.h>
+#include <stdlib.h>
 #include "dma.h"
 #include "fw_log.h"
 
@@ -12,7 +13,7 @@
 // #define DMATRANSFER_MEASURE_LATENCY   1
 
 /* DMA basic Configuration that needs for all platform*/
-#define DMA_ALIGNMENT 4
+#define DMA_ALIGNMENT 8
 #define DMA_MAX_TRANSFER_SIZE (1L << 24)
 #define BUSY_RETRY_COUNT 10
 
@@ -26,6 +27,13 @@ static uint32_t current_size = 0;
 static uint64_t transfer_sequence = 0;
 static uint64_t success_count = 0;
 static uint64_t error_count = 0;
+
+static sg_descriptor *sg_pool = NULL;
+uint32_t sg_used_mask = 0;
+
+sg_allocation_t sg_allocations[MAX_SG_ALLOCATIONS];
+int sg_allocation_count = 0;
+#define SG_DESC_SIZE_POOL 24
 
 #ifdef DMATRANSFER_MEASURE_LATENCY
 static struct timespec start_time;
@@ -50,28 +58,54 @@ static inline void dma_memory_barrier(void)
 }
 
 /*Address must be aligned and alignment based on platform architecture*/
-static int is_aligned(uint32_t addr)
+static int is_aligned(uint64_t addr)
 {
     return ((addr % DMA_ALIGNMENT) == 0);
 }
 
+/*Get descriptor index from descriptor pointer*/
+static int get_sg_descriptor_index(sg_descriptor *desc)
+{
+    if (sg_pool == NULL || desc == NULL)
+        return -1;
+    
+    if (desc < sg_pool || desc >= &sg_pool[SG_DESC_SIZE_POOL])
+        return -1;
+    
+    return (int)(desc - sg_pool);
+}
+
+/*Free SG descriptors by marking them as available*/
+static int free_sg_descriptors(int start_idx, uint32_t count)
+{
+    if (start_idx < 0 || start_idx >= SG_DESC_SIZE_POOL || count == 0 || start_idx + count > SG_DESC_SIZE_POOL)
+        return -1;
+    
+    for (uint32_t i = 0; i < count; i++)
+    {
+        sg_used_mask &= ~(1u << (start_idx + i));
+    }
+    return 0;
+}
+
 /* This is basically interrupt handler, get called when interrupt arrived*/
+/*register a interrupt handler callback function that the system calls when the DMA hardware asserts the interrupt line*/
 void dma_interrupt_handler(void)
 {
+    /*Clear the Interrupt Status*/
     dma_regs.DMA_HW_INTERRUPT_STATUS_REG = 1;
     sem_post(&dma_sem);
 }
 
-/* Note: This function wait for receing signal from interrupt handle semaphore
-   Note: Debug mode doesnt affect to actual performance when its disable*/
 static int wait_for_completion(void)
 {
     sem_wait(&dma_sem);
 
     uint8_t state = firmware_read_status() & 0x03;
+    uint8_t sg_state = firmware_sg_dma_read_status() & 0x03;
 
     log_event_t event = {0};
-    if (state == DMA_DONE)
+    if (state == DMA_DONE || sg_state == DMA_DONE)
     {
         success_count++;
 
@@ -99,6 +133,26 @@ static int wait_for_completion(void)
         /*store last successful details for debugging*/
         success_count++;
 
+        /* If SG DMA completed, free the descriptors */
+        if (sg_state == DMA_DONE && sg_allocation_count > 0)
+        {
+            /* Find active SG allocation and free it */
+            for (int k = 0; k < sg_allocation_count; k++)
+            {
+                if (sg_allocations[k].active)
+                {
+                    free_sg_descriptors(get_sg_descriptor_index(sg_allocations[k].start_desc), sg_allocations[k].count);
+                    /* Remove from allocation list */
+                    for (int m = k; m < sg_allocation_count - 1; m++)
+                    {
+                        sg_allocations[m] = sg_allocations[m + 1];
+                    }
+                    sg_allocation_count--;
+                    break;
+                }
+            }
+        }
+
         event.type = LOG_DMA_SUCCESS;
         event.transfer_seq = transfer_sequence;
         event.src = current_src;
@@ -114,9 +168,29 @@ static int wait_for_completion(void)
         return 0;
     }
 
-    if (state == DMA_ERROR)
+    if (state == DMA_ERROR || sg_state == DMA_ERROR)
     {
         error_count++;
+
+        /* If SG DMA error, free the descriptors */
+        if (sg_state == DMA_ERROR && sg_allocation_count > 0)
+        {
+            /* Find active SG allocation and free it */
+            for (int k = 0; k < sg_allocation_count; k++)
+            {
+                if (sg_allocations[k].active)
+                {
+                    free_sg_descriptors(get_sg_descriptor_index(sg_allocations[k].start_desc), sg_allocations[k].count);
+                    /* Remove from allocation list */
+                    for (int m = k; m < sg_allocation_count - 1; m++)
+                    {
+                        sg_allocations[m] = sg_allocations[m + 1];
+                    }
+                    sg_allocation_count--;
+                    break;
+                }
+            }
+        }
 
         event.type = LOG_DMA_ERROR;
         event.transfer_seq = transfer_sequence;
@@ -131,11 +205,11 @@ static int wait_for_completion(void)
         return DMA_ERR_HW_FAILURE;
     }
 
-    return DMA_ERR_UNKNOWN_STATE;
+    return DMA_ERR;
 }
 
 /*This is a main DMA start function for DMA API*/
-int firmware_start_dma(uint32_t src, uint32_t dst, uint32_t size)
+int firmware_start_dma(uint64_t src, uint64_t dst, uint32_t size)
 {
     if (size == 0)
         return DMA_ERR_SIZE_ZERO;
@@ -150,6 +224,7 @@ int firmware_start_dma(uint32_t src, uint32_t dst, uint32_t size)
         return DMA_ERR_DST_ALIGN;
 
     int retry = 0;
+    /*Wait for DMA to be idle*/
     while ((firmware_read_status() & 0x03) != DMA_IDLE)
         if (++retry >= BUSY_RETRY_COUNT)
             return DMA_ERR_BUSY_TIMEOUT;
@@ -164,8 +239,14 @@ int firmware_start_dma(uint32_t src, uint32_t dst, uint32_t size)
     /*cache flush*/
     dma_cache_flush((void *)src, size);
 
-    dma_regs.DMA_HW_SRC_REG = src;
-    dma_regs.DMA_HW_DST_REG = dst;
+    /* Write 64-bit source address to lower and upper 32-bit registers */
+    dma_regs.DMA_HW_SRC_REG_LOWER = (uint32_t)(src & 0xFFFFFFFFUL);
+    dma_regs.DMA_HW_SRC_REG_UPPER = (uint32_t)((src >> 32) & 0xFFFFFFFFUL);
+
+    /* Write 64-bit destination address to lower and upper 32-bit registers */
+    dma_regs.DMA_HW_DST_REG_LOWER = (uint32_t)(dst & 0xFFFFFFFFUL);
+    dma_regs.DMA_HW_DST_REG_UPPER = (uint32_t)((dst >> 32) & 0xFFFFFFFFUL);
+
     dma_regs.DMA_HW_SIZE_REG = size;
 
     /*weakly ordered memeory model*/
@@ -189,10 +270,185 @@ void dma_fw_init(void)
 {
     sem_init(&dma_sem, 0, 0);
     fw_log_init();
+    sg_descriptor_pool_init();
 }
 
 void dma_fw_deinit(void)
 {
     fw_log_shutdown();
     sem_destroy(&dma_sem);
+}
+
+/*Validate SG descriptor*/
+static int validate_sg_descriptor(sg_descriptor *desc)
+{
+    if (desc == NULL)
+        return DMA_ERR_DESC_PTR;
+
+    if (desc->transfer_size == 0)
+        return DMA_ERR_SIZE_ZERO;
+
+    if (desc->transfer_size > DMA_MAX_TRANSFER_SIZE)
+        return DMA_ERR_SIZE_EXCEEDED;
+
+    if (!is_aligned(desc->src_addr))
+        return DMA_ERR_SRC_ALIGN;
+
+    if (!is_aligned(desc->dst_addr))
+        return DMA_ERR_DST_ALIGN;
+
+    return 0;
+}
+
+/*Queue a single SG descriptor to the DMA
+int firmware_sg_dma_queue_descriptor(sg_descriptor *desc)
+{
+   if (validate_sg_descriptor(desc) != 0)
+     return DMA_ERR_DESC_PTR;
+
+    //*Cache flush for source data
+    dma_cache_flush((void *)desc->src_addr, desc->transfer_size);
+
+    ///*Update tail descriptor pointer to queue new descriptor
+    uint64_t desc_addr = (uint64_t)desc;
+    sg_dma_regs.SG_TAIL_DESC_LOWER = (uint32_t)(desc_addr & 0xFFFFFFFFUL);
+    sg_dma_regs.SG_TAIL_DESC_UPPER = (uint32_t)((desc_addr >> 32) & 0xFFFFFFFFUL);
+
+    ///*Memory barrier for weakly ordered systems
+    dma_memory_barrier();
+
+    return 0;
+}
+*/
+
+/*Start SG DMA transfer with descriptor list*/
+int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descriptors)
+{
+    if (descriptor_list == NULL || num_descriptors == 0)
+        return DMA_ERR_DESC_PTR;
+
+    /*Validate all descriptors in the list*/
+    for (uint32_t i = 0; i < num_descriptors; i++)
+    {
+        if (validate_sg_descriptor(&descriptor_list[i]) != 0)
+            return DMA_ERR_DESC_PTR;
+
+        /*Cache flush for each descriptor's source data*/
+        /*Note I am assuming the descriptor list is allocated from coherent memeory region so avoid frequent cache flush*/
+        dma_cache_flush((void *)descriptor_list[i].src_addr,
+                       descriptor_list[i].transfer_size);
+    }
+
+    /*Wait for SG DMA to be idle*/
+    int retry = 0;
+    while ((firmware_sg_dma_read_status() & 0x03) != DMA_IDLE)
+        if (++retry >= BUSY_RETRY_COUNT)
+            return DMA_ERR_BUSY_TIMEOUT;
+
+    /*Increment transfer sequence for logging*/
+    transfer_sequence++;
+
+    /* Find the allocation for this descriptor list and mark it as active */
+    for (int k = 0; k < sg_allocation_count; k++)
+    {
+        if (sg_allocations[k].start_desc == &descriptor_list[0] && 
+            sg_allocations[k].count == num_descriptors &&
+            sg_allocations[k].active == 0)
+        {
+            sg_allocations[k].active = 1;
+            break;
+        }
+    }
+
+    /*Set current descriptor pointer to first descriptor*/
+    uint64_t desc_addr = (uint64_t)&descriptor_list[0];
+    sg_dma_regs.SG_CURRENT_DESC_LOWER = (uint32_t)(desc_addr & 0xFFFFFFFFUL);
+    sg_dma_regs.SG_CURRENT_DESC_UPPER = (uint32_t)((desc_addr >> 32) & 0xFFFFFFFFUL);
+
+    /*Set tail descriptor pointer to last descriptor*/
+    desc_addr = (uint64_t)&descriptor_list[num_descriptors - 1];
+    sg_dma_regs.SG_TAIL_DESC_LOWER = (uint32_t)(desc_addr & 0xFFFFFFFFUL);
+    sg_dma_regs.SG_TAIL_DESC_UPPER = (uint32_t)((desc_addr >> 32) & 0xFFFFFFFFUL);
+
+    /*Memory barrier*/
+    dma_memory_barrier();
+
+    /*Issue start command for SG DMA*/
+    sg_dma_regs.SG_CMD_REG = 1;
+
+    /*Log SG DMA start*/
+    log_event_t event = {0};
+    event.type = LOG_DMA_SUCCESS;
+    event.transfer_seq = transfer_sequence;
+    event.src = descriptor_list[0].src_addr;
+    event.dst = descriptor_list[0].dst_addr;
+    event.size = num_descriptors;  /*Number of descriptors*/
+    event.success_count = success_count;
+    event.error_count = error_count;
+
+    fw_log_event(&event);
+
+    return 0;
+}
+
+/*Read SG DMA status*/
+uint8_t firmware_sg_dma_read_status(void)
+{
+    return sg_dma_regs.SG_STATUS;
+}
+
+int sg_descriptor_pool_init(void)
+{
+    sg_pool = malloc(sizeof(sg_descriptor) * SG_DESC_SIZE_POOL);
+    if (!sg_pool)
+        return -1;
+    for (int i = 0; i < 24; i++)
+    {
+        sg_pool[i].next_descriptor = (uint64_t)&sg_pool[(i + 1) % 24];
+    }
+    sg_used_mask = 0;
+    return 0;
+}
+
+int get_free_sg_descriptor(sg_descriptor **desc, uint32_t num_descriptors)
+{
+    if (num_descriptors == 0 || num_descriptors > SG_DESC_SIZE_POOL)
+        return DMA_ERR_DESC_NOT_AVAILABLE;
+
+    /* Find num_descriptors consecutive free descriptors */
+    for (int i = 0; i <= SG_DESC_SIZE_POOL - num_descriptors; i++)
+    {
+        /* Check if the required number of descriptors are free starting from position i */
+        int found = 1;
+        for (int j = 0; j < num_descriptors; j++)
+        {
+            if ((sg_used_mask & (1u << (i + j))) != 0)
+            {
+                found = 0;
+                break;
+            }
+        }
+
+        if (found)
+        {
+            /* Mark all descriptors as used */
+            for (int j = 0; j < num_descriptors; j++)
+            {
+                sg_used_mask |= (1u << (i + j));
+            }
+            *desc = &sg_pool[i];
+            
+            /* Add to allocation tracking list for asynchronous mode */
+            if (sg_allocation_count < MAX_SG_ALLOCATIONS)
+            {
+                sg_allocations[sg_allocation_count].start_desc = &sg_pool[i];
+                sg_allocations[sg_allocation_count].count = num_descriptors;
+                sg_allocations[sg_allocation_count].active = 0;  /* Not active yet */
+                sg_allocation_count++;
+            }
+            
+            return 0;
+        }
+    }
+    return DMA_ERR_DESC_NOT_AVAILABLE;
 }
