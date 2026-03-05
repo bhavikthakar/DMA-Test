@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <semaphore.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <time.h>
 #include <string.h>
@@ -30,6 +31,9 @@ static uint64_t error_count = 0;
 
 static sg_descriptor *sg_pool = NULL;
 uint32_t sg_used_mask = 0;
+
+/* protect SG descriptor pool and allocation list */
+static pthread_mutex_t sg_mutex;
 
 sg_allocation_t sg_allocations[MAX_SG_ALLOCATIONS];
 int sg_allocation_count = 0;
@@ -137,6 +141,7 @@ static int wait_for_completion(void)
         if (sg_state == DMA_DONE && sg_allocation_count > 0)
         {
             /* Find active SG allocation and free it */
+            pthread_mutex_lock(&sg_mutex);
             for (int k = 0; k < sg_allocation_count; k++)
             {
                 if (sg_allocations[k].active)
@@ -151,6 +156,7 @@ static int wait_for_completion(void)
                     break;
                 }
             }
+            pthread_mutex_unlock(&sg_mutex);
         }
 
         event.type = LOG_DMA_SUCCESS;
@@ -176,6 +182,7 @@ static int wait_for_completion(void)
         if (sg_state == DMA_ERROR && sg_allocation_count > 0)
         {
             /* Find active SG allocation and free it */
+            pthread_mutex_lock(&sg_mutex);
             for (int k = 0; k < sg_allocation_count; k++)
             {
                 if (sg_allocations[k].active)
@@ -190,6 +197,7 @@ static int wait_for_completion(void)
                     break;
                 }
             }
+            pthread_mutex_unlock(&sg_mutex);
         }
 
         event.type = LOG_DMA_ERROR;
@@ -277,6 +285,7 @@ void dma_fw_deinit(void)
 {
     fw_log_shutdown();
     sem_destroy(&dma_sem);
+    pthread_mutex_destroy(&sg_mutex);
 }
 
 /*Validate SG descriptor*/
@@ -349,6 +358,7 @@ int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descripto
     transfer_sequence++;
 
     /* Find the allocation for this descriptor list and mark it as active */
+    pthread_mutex_lock(&sg_mutex);
     for (int k = 0; k < sg_allocation_count; k++)
     {
         if (sg_allocations[k].start_desc == &descriptor_list[0] && 
@@ -359,6 +369,7 @@ int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descripto
             break;
         }
     }
+    pthread_mutex_unlock(&sg_mutex);
 
     /*Set current descriptor pointer to first descriptor*/
     uint64_t desc_addr = (uint64_t)&descriptor_list[0];
@@ -402,11 +413,19 @@ int sg_descriptor_pool_init(void)
     sg_pool = malloc(sizeof(sg_descriptor) * SG_DESC_SIZE_POOL);
     if (!sg_pool)
         return -1;
-    for (int i = 0; i < 24; i++)
+    for (int i = 0; i < SG_DESC_SIZE_POOL; i++)
     {
-        sg_pool[i].next_descriptor = (uint64_t)&sg_pool[(i + 1) % 24];
+        sg_pool[i].next_descriptor = (uint64_t)&sg_pool[(i + 1) % SG_DESC_SIZE_POOL];
     }
     sg_used_mask = 0;
+    
+    /* Initialize mutex with priority inheritance to prevent priority inversion */
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT);
+    pthread_mutex_init(&sg_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+    
     return 0;
 }
 
@@ -414,6 +433,8 @@ int get_free_sg_descriptor(sg_descriptor **desc, uint32_t num_descriptors)
 {
     if (num_descriptors == 0 || num_descriptors > SG_DESC_SIZE_POOL)
         return DMA_ERR_DESC_NOT_AVAILABLE;
+
+    pthread_mutex_lock(&sg_mutex);
 
     /* Find num_descriptors consecutive free descriptors */
     for (int i = 0; i <= SG_DESC_SIZE_POOL - num_descriptors; i++)
@@ -447,8 +468,11 @@ int get_free_sg_descriptor(sg_descriptor **desc, uint32_t num_descriptors)
                 sg_allocation_count++;
             }
             
+            pthread_mutex_unlock(&sg_mutex);
             return 0;
         }
     }
+
+    pthread_mutex_unlock(&sg_mutex);
     return DMA_ERR_DESC_NOT_AVAILABLE;
 }
