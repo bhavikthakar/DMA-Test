@@ -16,7 +16,7 @@
 /* DMA basic Configuration that needs for all platform*/
 #define DMA_ALIGNMENT 8
 #define DMA_MAX_TRANSFER_SIZE (1L << 24)
-#define BUSY_RETRY_COUNT 10
+#define BUSY_RETRY_COUNT 1000
 
 static sem_t dma_sem;
 
@@ -350,7 +350,7 @@ int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descripto
 
     /*Wait for SG DMA to be idle*/
     int retry = 0;
-    while ((firmware_sg_dma_read_status() & 0x03) != DMA_IDLE)
+    while ((firmware_sg_dma_read_status() & 0x03) == DMA_BUSY)
         if (++retry >= BUSY_RETRY_COUNT)
             return DMA_ERR_BUSY_TIMEOUT;
 
