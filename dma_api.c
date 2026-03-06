@@ -5,6 +5,7 @@
 #include <time.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include "dma.h"
 #include "fw_log.h"
 
@@ -65,6 +66,10 @@
  *      - Implement recovery mechanism from DMA errors (e.g., reset
  *        DMA controller and re-initiate transfer)
  *      - Log recovery actions for further analysis
+ * 
+ * (13) Interrupt Latency Logging: (NOT POSSIBLE TO MEASURE LATENCY IN THIS SIMULATION ENVIRONMENT)
+ *      - DMA Interrupt Pin asserting to the Interrupt Service Routine (ISR) 
+ *        finishing. If this time is too high,
  */
 
 /* define the global DMA register instance referenced by dma.h */
@@ -77,7 +82,29 @@
 #define DMA_MAX_TRANSFER_SIZE (1L << 24)
 #define BUSY_RETRY_COUNT 1000
 
+/* toggle watchdog feature */
+#define DMA_WATCHDOG_ENABLED 1
+#define DMA_WATCHDOG_TIMEOUT_SECONDS 1 // Timeout must be milliseconds level for real detection, but using seconds for easier testing.
+
 static sem_t dma_sem;
+
+#if DMA_WATCHDOG_ENABLED
+/* Watchdog for silent DMA failure detection */
+static _Atomic int watchdog_active = 0;          /* indicates transfer in progress */
+static _Atomic int watchdog_running = 1;         /* keep thread alive */
+_Atomic int watchdog_triggered = 0;       /* set when timeout occurs */
+static int watchdog_timeout_seconds = DMA_WATCHDOG_TIMEOUT_SECONDS;
+static pthread_t watchdog_thread;
+static pthread_mutex_t watchdog_mutex;
+static pthread_cond_t watchdog_cond;  /* signal start/stop */
+
+/* allow runtime adjustment (tests) */
+void dma_set_watchdog_timeout(int seconds)
+{
+    if (seconds > 0)
+        watchdog_timeout_seconds = seconds;
+}
+#endif
 
 /* Transfer Debug variable */
 static uint64_t current_src = 0;
@@ -149,6 +176,48 @@ static int free_sg_descriptors(int start_idx, uint32_t count)
     }
     return 0;
 }
+
+#if DMA_WATCHDOG_ENABLED
+/* Watchdog function for detecting silent DMA failures */
+static void *dma_watchdog_function(void *arg)
+{
+    (void)arg;
+    while (watchdog_running) {
+        /* wait for a transfer to start */
+        pthread_mutex_lock(&watchdog_mutex);
+        while (!watchdog_active && watchdog_running) {
+            pthread_cond_wait(&watchdog_cond, &watchdog_mutex);
+        }
+        pthread_mutex_unlock(&watchdog_mutex);
+
+        if (!watchdog_running)
+            break;
+
+        /* now a transfer is underway */
+        int elapsed = 0;
+        int max_iterations = watchdog_timeout_seconds * 10; // 100ms intervals
+        while (watchdog_active && elapsed < max_iterations) {
+            usleep(100000); // 100ms
+            elapsed++;
+        }
+
+        if (watchdog_active) {
+            /* Timeout occurred - log silent failure */
+            watchdog_triggered = 1;
+            char error_log[256];
+            snprintf(error_log, sizeof(error_log),
+                     "DMA SILENT HW FAILURE: Transfer=%llu Src=%llu Dst=%llu Size=%u",
+                     (unsigned long long)transfer_sequence,
+                     (unsigned long long)current_src,
+                     (unsigned long long)current_dst,
+                     current_size);
+            fw_log_async(error_log);
+        }
+    }
+
+    return NULL;
+}
+#endif
 
 /* This is basically interrupt handler, get called when interrupt arrived*/
 /*register a interrupt handler callback function that the system calls when the DMA hardware asserts the interrupt line*/
@@ -299,6 +368,11 @@ static int wait_for_completion(void)
 {
     sem_wait(&dma_sem);
 
+    /* notify watchdog that transfer is done */
+#if DMA_WATCHDOG_ENABLED
+    watchdog_active = 0;
+#endif
+
     uint8_t state = firmware_read_status() & 0x03;
     uint8_t sg_state = firmware_sg_dma_read_status() & 0x03;
 
@@ -366,6 +440,11 @@ int firmware_start_dma(uint64_t src, uint64_t dst, uint32_t size)
 
     dma_regs.DMA_HW_CMD_REG = 1;
 
+#if DMA_WATCHDOG_ENABLED
+    /* signal watchdog that a transfer is active */
+    watchdog_active = 1;
+    pthread_cond_signal(&watchdog_cond);
+#endif
     return wait_for_completion();
 }
 
@@ -379,10 +458,28 @@ void dma_fw_init(void)
     sem_init(&dma_sem, 0, 0);
     fw_log_init();
     sg_descriptor_pool_init();
+
+#if DMA_WATCHDOG_ENABLED
+    /* prepare watchdog thread and sync primitives */
+    pthread_mutex_init(&watchdog_mutex, NULL);
+    pthread_cond_init(&watchdog_cond, NULL);
+    watchdog_active = 0;
+    watchdog_running = 1;
+    pthread_create(&watchdog_thread, NULL, dma_watchdog_function, NULL);
+#endif
 }
 
 void dma_fw_deinit(void)
 {
+#if DMA_WATCHDOG_ENABLED
+    /* stop watchdog thread */
+    watchdog_running = 0;
+    pthread_cond_signal(&watchdog_cond);
+    pthread_join(watchdog_thread, NULL);
+    pthread_mutex_destroy(&watchdog_mutex);
+    pthread_cond_destroy(&watchdog_cond);
+#endif
+
     fw_log_shutdown();
     sem_destroy(&dma_sem);
     pthread_mutex_destroy(&sg_mutex);

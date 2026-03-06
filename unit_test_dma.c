@@ -6,6 +6,11 @@
 #include <unistd.h> /* for usleep */
 #include "dma.h"
 
+#if DMA_WATCHDOG_ENABLED
+extern _Atomic int watchdog_triggered;
+void dma_set_watchdog_timeout(int seconds);
+#endif
+
 dma_register dma_regs =
 {
     .DMA_HW_SRC_REG_LOWER = 0,
@@ -81,6 +86,41 @@ void test_dma_fw_init()
     dma_fw_init();
     TEST_ASSERT(dma_regs.DMA_HW_STATUS == DMA_IDLE);
 }
+
+#if DMA_WATCHDOG_ENABLED
+/* Test: Watchdog timeout detection */
+void test_watchdog_timeout()
+{
+    dma_fw_init();
+    /* shorten timeout for quicker test */
+    dma_set_watchdog_timeout(1);
+
+    /* ensure hardware idle */
+    dma_regs.DMA_HW_STATUS = DMA_IDLE;
+
+    watchdog_triggered = 0;
+
+    struct thread_args args = {
+        .src = 0x1000,
+        .dst = 0x2000,
+        .size = 1024,
+        .result = -999
+    };
+
+    pthread_t t;
+    pthread_create(&t, NULL, dma_call_thread, &args);
+
+    /* wait longer than the 1s timeout */
+    usleep(1500000);
+
+    TEST_ASSERT(watchdog_triggered);
+
+    /* now simulate successful completion to unblock thread */
+    simulate_success();
+    pthread_join(t, NULL);
+    TEST_ASSERT_EQUAL(args.result, DMA_SUCCESS);
+}
+#endif
 
 /* Test: Valid DMA transfer with correct parameters (requires interrupt simulation) */
 void test_valid_dma_transfer()
@@ -444,6 +484,11 @@ int main()
 
     test_dma_fw_init();
     printf("✓ test_dma_fw_init passed\n");
+
+#if DMA_WATCHDOG_ENABLED
+    test_watchdog_timeout();
+    printf("✓ test_watchdog_timeout passed\n");
+#endif
 
     test_valid_dma_transfer();
     printf("✓ test_valid_dma_transfer passed\n");

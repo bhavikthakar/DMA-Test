@@ -48,6 +48,11 @@ typedef struct
 /* Global SG DMA register instance */
 extern sg_dma_register sg_dma_regs;
 
+/* Watchdog feature toggle (can be overridden via -D flag) */
+#ifndef DMA_WATCHDOG_ENABLED
+#define DMA_WATCHDOG_ENABLED 1
+#endif
+
 /* DMA States */
 #define DMA_IDLE 0x00
 #define DMA_BUSY 0x01
