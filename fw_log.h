@@ -32,6 +32,7 @@ typedef struct
 
 void fw_log_init(void);
 void fw_log_event(log_event_t *event);
+void fw_log_async(const char *message);
 void fw_log_shutdown(void);
 
 #endif

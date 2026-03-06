@@ -101,6 +101,142 @@ void dma_interrupt_handler(void)
     sem_post(&dma_sem);
 }
 
+/*DMA success handle for direct mode and scatter-gather mode*/
+static int handle_dma_success(uint8_t state, uint8_t sg_state, log_event_t *event)
+{
+    success_count++;
+
+#ifdef DMATRANSFER_MEASURE_LATENCY
+    struct timespec end_time;
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+
+    uint64_t start_us = (start_time.tv_sec * 1000000ULL) +
+                        (start_time.tv_nsec / 1000ULL);
+
+    uint64_t end_us = (end_time.tv_sec * 1000000ULL) +
+                      (end_time.tv_nsec / 1000ULL);
+
+    uint64_t latency_us = end_us - start_us;
+
+    char latency_log[256];
+    snprintf(latency_log, sizeof(latency_log),
+             "DMA LATENCY: Transfer=%llu Size=%u Latency=%llu us",
+             (unsigned long long)transfer_sequence,
+             current_size,
+             (unsigned long long)latency_us);
+
+    fw_log_async(latency_log);
+#endif
+    /*store last successful details for debugging*/
+    success_count++;
+
+    /* If SG DMA completed, free the descriptors */
+    if (sg_state == DMA_DONE && sg_allocation_count > 0)
+    {
+        /* Find active SG allocation and free it */
+        pthread_mutex_lock(&sg_mutex);
+        for (int k = 0; k < sg_allocation_count; k++)
+        {
+            if (sg_allocations[k].active)
+            {
+                free_sg_descriptors(get_sg_descriptor_index(sg_allocations[k].start_desc), sg_allocations[k].count);
+                /* Remove from allocation list */
+                for (int m = k; m < sg_allocation_count - 1; m++)
+                {
+                    sg_allocations[m] = sg_allocations[m + 1];
+                }
+                sg_allocation_count--;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&sg_mutex);
+        return 0;
+    }
+
+    event->type = LOG_DMA_SUCCESS;
+    event->transfer_seq = transfer_sequence;
+    event->src = current_src;
+    event->dst = current_dst;
+    event->size = current_size;
+    event->success_count = success_count;
+    event->error_count = error_count;
+
+    //We can take PTP register value and store in log event on actual platform
+    //Generally we dont store all successful transfer but this is just of debugging purpose.
+    fw_log_event(event);
+    return 0;
+}
+
+/*DMA error handler for direct mode and scatter-gather mode*/
+static int handle_dma_error(uint8_t state, uint8_t sg_state, log_event_t *event)
+{
+    error_count++;
+
+    /* If SG DMA error, free the descriptors after logging all details*/
+    if (sg_state == DMA_ERROR && sg_allocation_count > 0)
+    {
+        /* Find active SG allocation and free it */
+        pthread_mutex_lock(&sg_mutex);
+        for (int k = 0; k < sg_allocation_count; k++)
+        {
+            if (sg_allocations[k].active)
+            {
+                char error_log[4096];
+                int offset = snprintf(error_log, sizeof(error_log),
+                                      "DMA ERROR: Transfer=%llu NumDesc=%u",
+                                      (unsigned long long)transfer_sequence,
+                                      sg_allocations[k].count);
+                for (int i = 0; i < sg_allocations[k].count; i++)
+                {
+                    sg_descriptor *desc = &sg_allocations[k].start_desc[i];
+                    offset += snprintf(error_log + offset, sizeof(error_log) - offset,
+                                       " Desc%d: addr=%p src=%llu dst=%llu size=%u",
+                                       i, (void*)desc,
+                                       (unsigned long long)desc->src_addr,
+                                       (unsigned long long)desc->dst_addr,
+                                       desc->transfer_size);
+                }
+                fw_log_async(error_log);
+                free_sg_descriptors(get_sg_descriptor_index(sg_allocations[k].start_desc), sg_allocations[k].count);
+                /* Remove from allocation list */
+                for (int m = k; m < sg_allocation_count - 1; m++)
+                {
+                    sg_allocations[m] = sg_allocations[m + 1];
+                }
+                sg_allocation_count--;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&sg_mutex);
+        
+        return DMA_ERR_HW_FAILURE;
+    }
+    else if (state == DMA_ERROR)
+    {
+        char error_log[256];
+        snprintf(error_log, sizeof(error_log),
+                 "DMA ERROR: Transfer=%llu Src=%llu Dst=%llu Size=%u",
+                 (unsigned long long)transfer_sequence,
+                 (unsigned long long)current_src,
+                 (unsigned long long)current_dst,
+                 current_size);
+        fw_log_async(error_log);
+    }
+
+    event->type = LOG_DMA_ERROR;
+    event->transfer_seq = transfer_sequence;
+    event->src = current_src;
+    event->dst = current_dst;
+    event->size = current_size;
+    event->success_count = success_count;
+    event->error_count = error_count;
+    //We can take PTP register value and store in log event on actual platform
+    //FW logging works on separate thread and it will not affect to actual performance of DMA transfer
+    fw_log_event(event);
+    return DMA_ERR_HW_FAILURE;
+}
+
+/*wait for receiving signal from Interrupt handler*/
 static int wait_for_completion(void)
 {
     sem_wait(&dma_sem);
@@ -111,106 +247,12 @@ static int wait_for_completion(void)
     log_event_t event = {0};
     if (state == DMA_DONE || sg_state == DMA_DONE)
     {
-        success_count++;
-
-#ifdef DMATRANSFER_MEASURE_LATENCY
-        struct timespec end_time;
-        clock_gettime(CLOCK_MONOTONIC, &end_time);
-
-        uint64_t start_us = (start_time.tv_sec * 1000000ULL) +
-                            (start_time.tv_nsec / 1000ULL);
-
-        uint64_t end_us = (end_time.tv_sec * 1000000ULL) +
-                          (end_time.tv_nsec / 1000ULL);
-
-        uint64_t latency_us = end_us - start_us;
-
-        char latency_log[256];
-        snprintf(latency_log, sizeof(latency_log),
-                 "DMA LATENCY: Transfer=%llu Size=%u Latency=%llu us",
-                 (unsigned long long)transfer_sequence,
-                 current_size,
-                 (unsigned long long)latency_us);
-
-        fw_log_async(latency_log);
-#endif
-        /*store last successful details for debugging*/
-        success_count++;
-
-        /* If SG DMA completed, free the descriptors */
-        if (sg_state == DMA_DONE && sg_allocation_count > 0)
-        {
-            /* Find active SG allocation and free it */
-            pthread_mutex_lock(&sg_mutex);
-            for (int k = 0; k < sg_allocation_count; k++)
-            {
-                if (sg_allocations[k].active)
-                {
-                    free_sg_descriptors(get_sg_descriptor_index(sg_allocations[k].start_desc), sg_allocations[k].count);
-                    /* Remove from allocation list */
-                    for (int m = k; m < sg_allocation_count - 1; m++)
-                    {
-                        sg_allocations[m] = sg_allocations[m + 1];
-                    }
-                    sg_allocation_count--;
-                    break;
-                }
-            }
-            pthread_mutex_unlock(&sg_mutex);
-        }
-
-        event.type = LOG_DMA_SUCCESS;
-        event.transfer_seq = transfer_sequence;
-        event.src = current_src;
-        event.dst = current_dst;
-        event.size = current_size;
-        event.success_count = success_count;
-        event.error_count = error_count;
-
-
-        //We can take PTP register value and store in log event on actual platform
-        //Generally we dont store all successful transfer but this is just of debugging purpose.
-        fw_log_event(&event);
-        return 0;
+        return handle_dma_success(state, sg_state, &event);
     }
 
     if (state == DMA_ERROR || sg_state == DMA_ERROR)
     {
-        error_count++;
-
-        /* If SG DMA error, free the descriptors */
-        if (sg_state == DMA_ERROR && sg_allocation_count > 0)
-        {
-            /* Find active SG allocation and free it */
-            pthread_mutex_lock(&sg_mutex);
-            for (int k = 0; k < sg_allocation_count; k++)
-            {
-                if (sg_allocations[k].active)
-                {
-                    free_sg_descriptors(get_sg_descriptor_index(sg_allocations[k].start_desc), sg_allocations[k].count);
-                    /* Remove from allocation list */
-                    for (int m = k; m < sg_allocation_count - 1; m++)
-                    {
-                        sg_allocations[m] = sg_allocations[m + 1];
-                    }
-                    sg_allocation_count--;
-                    break;
-                }
-            }
-            pthread_mutex_unlock(&sg_mutex);
-        }
-
-        event.type = LOG_DMA_ERROR;
-        event.transfer_seq = transfer_sequence;
-        event.src = current_src;
-        event.dst = current_dst;
-        event.size = current_size;
-        event.success_count = success_count;
-        event.error_count = error_count;
-        //We can take PTP register value and store in log event on actual platform
-        //FW logging works on separate thread and it will not affect to actual performance of DMA transfer
-        fw_log_event(&event);
-        return DMA_ERR_HW_FAILURE;
+        return handle_dma_error(state, sg_state, &event);
     }
 
     return DMA_ERR;
