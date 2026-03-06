@@ -109,7 +109,9 @@ static void *log_worker(void *arg)
 
             fflush(log_file);
         } else {
-            fprintf(log_file, "%s\n", item.data.string);
+            char time_str[64];
+            format_timestamp(time_str, sizeof(time_str));
+            fprintf(log_file, "[%s] %s\n", time_str, item.data.string);
             fflush(log_file);
         }
     }

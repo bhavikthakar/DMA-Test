@@ -105,19 +105,19 @@
 
 /* toggle watchdog feature */
 #define DMA_WATCHDOG_ENABLED 1
-#define DMA_WATCHDOG_TIMEOUT_SECONDS 1 // Timeout must be milliseconds level for real detection, but using seconds for easier testing.
+#define DMA_WATCHDOG_TIMEOUT_SECONDS 5 // Timeout must be milliseconds level for real detection, but using seconds for easier testing.
 
 static sem_t dma_sem;
 
 #if DMA_WATCHDOG_ENABLED
 /* Watchdog for silent DMA failure detection */
-static _Atomic int watchdog_active = 0;          /* indicates transfer in progress */
-static _Atomic int watchdog_running = 1;         /* keep thread alive */
-_Atomic int watchdog_triggered = 0;       /* set when timeout occurs */
+static _Atomic int watchdog_active = 0;  /* indicates transfer in progress */
+static _Atomic int watchdog_running = 1; /* keep thread alive */
+_Atomic int watchdog_triggered = 0;      /* set when timeout occurs */
 static int watchdog_timeout_seconds = DMA_WATCHDOG_TIMEOUT_SECONDS;
 static pthread_t watchdog_thread;
 static pthread_mutex_t watchdog_mutex;
-static pthread_cond_t watchdog_cond;  /* signal start/stop */
+static pthread_cond_t watchdog_cond; /* signal start/stop */
 
 /* allow runtime adjustment (tests) */
 void dma_set_watchdog_timeout(int seconds)
@@ -203,10 +203,12 @@ static int free_sg_descriptors(int start_idx, uint32_t count)
 static void *dma_watchdog_function(void *arg)
 {
     (void)arg;
-    while (watchdog_running) {
+    while (watchdog_running)
+    {
         /* wait for a transfer to start */
         pthread_mutex_lock(&watchdog_mutex);
-        while (!watchdog_active && watchdog_running) {
+        while (!watchdog_active && watchdog_running)
+        {
             pthread_cond_wait(&watchdog_cond, &watchdog_mutex);
         }
         pthread_mutex_unlock(&watchdog_mutex);
@@ -217,12 +219,14 @@ static void *dma_watchdog_function(void *arg)
         /* now a transfer is underway */
         int elapsed = 0;
         int max_iterations = watchdog_timeout_seconds * 10; // 100ms intervals
-        while (watchdog_active && elapsed < max_iterations) {
+        while (watchdog_active && elapsed < max_iterations)
+        {
             usleep(100000); // 100ms
             elapsed++;
         }
 
-        if (watchdog_active) {
+        if (watchdog_active)
+        {
             /* Timeout occurred - log silent failure */
             watchdog_triggered = 1;
             char error_log[256];
@@ -288,6 +292,7 @@ static int handle_dma_success(uint8_t state, uint8_t sg_state, log_event_t *even
             if (sg_allocations[k].active)
             {
                 free_sg_descriptors(get_sg_descriptor_index(sg_allocations[k].start_desc), sg_allocations[k].count);
+                sg_allocations[k].active = 0; /* Mark as inactive */
                 /* Remove from allocation list */
                 for (int m = k; m < sg_allocation_count - 1; m++)
                 {
@@ -329,7 +334,7 @@ static int handle_dma_error(uint8_t state, uint8_t sg_state, log_event_t *event)
         {
             if (sg_allocations[k].active)
             {
-                char error_log[4096];
+                char error_log[8048];
                 int offset = snprintf(error_log, sizeof(error_log),
                                       "DMA ERROR: Transfer=%llu NumDesc=%u",
                                       (unsigned long long)transfer_sequence,
@@ -579,10 +584,12 @@ int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descripto
     pthread_mutex_lock(&sg_mutex);
     for (int k = 0; k < sg_allocation_count; k++)
     {
+        /* match allocation by start pointer; allow reserved count >= requested */
         if (sg_allocations[k].start_desc == &descriptor_list[0] &&
             sg_allocations[k].count == num_descriptors &&
             sg_allocations[k].active == 0)
         {
+            /* mark as active and record the actual number of descriptors used */
             sg_allocations[k].active = 1;
             break;
         }
@@ -617,7 +624,7 @@ int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descripto
 
     fw_log_event(&event);
 
-    return 0;
+    return wait_for_completion();
 }
 
 /*Read SG DMA status*/
