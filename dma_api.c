@@ -66,10 +66,31 @@
  *      - Implement recovery mechanism from DMA errors (e.g., reset
  *        DMA controller and re-initiate transfer)
  *      - Log recovery actions for further analysis
- * 
+ *
  * (13) Interrupt Latency Logging: (NOT POSSIBLE TO MEASURE LATENCY IN THIS SIMULATION ENVIRONMENT)
- *      - DMA Interrupt Pin asserting to the Interrupt Service Routine (ISR) 
+ *      - DMA Interrupt Pin asserting to the Interrupt Service Routine (ISR)
  *        finishing. If this time is too high,
+ *
+ * (14) DMA Transfer Retry Mechanism: (NOT IMPLEMENTED IN THIS SIMULATION ENVIRONMENT)
+ *      - Implement retry mechanism for transient DMA errors (e.g., AXI bus errors)
+ *
+ * (15) DMA Throughput Measurement: (NOT POSSIBLE TO MEASURE THROUGHPUT IN THIS SIMULATION ENVIRONMENT)
+ *      - Measure throughput from AXI monitor (APM) block if configured or NoC performance monitor register counters.
+ *      - Can be done from firmware but more accurately measured from external AXI/NoC counters.
+ *
+ *
+ * I would ask the RTL team to provide more detailed status register information when a DMA error interrupt is generated, such as:
+ *
+ *   (1) DMA Internal Error – for example, caused by a buffer length of 0.
+ *
+ *   (2) Source or destination alignment issue indication.
+ *
+ *   (3) AXI/NoC bus error at a specified address.: e.g "Out of Bounds" or points to a reserved memory region.
+ *
+ *   (4) Scatter-Gather (SG) mode descriptor address pointer error.
+ *
+ *   (5) Most importantly, when a failure occurs in SG mode, whether it indicates which specific descriptor caused the failure.
+ *
  */
 
 /* define the global DMA register instance referenced by dma.h */
