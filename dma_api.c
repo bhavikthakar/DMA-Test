@@ -8,6 +8,65 @@
 #include "dma.h"
 #include "fw_log.h"
 
+/*
+ * DMA Observation Task:
+ *
+ * (1) Hardware Error:
+ *     - Log relevant src address, dest address, and size in log file
+ *       with timestamp whenever DMA_ERROR is observed on status register
+ *     - FW log runs on separate thread and doesn't affect DMA performance
+ *
+ * (2) DMA Latency Measurement:
+ *     - Record PTP register value before starting DMA transfer and after
+ *       receiving interrupt for transfer completion
+ *     - Calculate and log latency with transfer details
+ *
+ * (3) SG DMA Descriptor Validation:
+ *     - Read and log all descriptors when SG DMA transfer completes
+ *       with error for debugging purposes
+ *
+ * (4) SG DMA Resource Management:
+ *     - Maintain a pool of SG descriptors and allocation tracking list
+ *       to manage resources for asynchronous SG DMA transfers
+ *
+ * (5) DMA Transfer Statistics:
+ *     - Maintain statistics for successful and failed DMA transfers
+ *       to monitor performance and identify issues
+ *
+ * (6) DMA Transfer Sequence Tracking:
+ *     - Maintain sequence number for each DMA transfer to correlate
+ *       logs and identify specific transfers in case of issues
+ *
+ * (7) DMA Transfer Size Validation:
+ *     - Validate transfer size for each DMA transfer
+ *     - Log any transfers exceeding maximum supported size or zero size
+ *
+ * (8) DMA Alignment Validation:
+ *     - Validate source and destination addresses for proper alignment
+ *       based on platform requirements
+ *     - Log any misaligned transfers
+ *
+ * (9) DMA Busy Timeout Handling:
+ *     - Implement timeout mechanism when waiting for DMA hardware
+ *       to become idle before starting new transfer
+ *     - Log any occurrences of busy timeouts
+ *
+ * (10) DMA Silent/Dead Failure Handling:
+ *      - Implement mechanism to detect silent failures (e.g., AXI bus
+ *        errors, timeouts) without explicit error status
+ *      - Log detected failures for further analysis
+ *
+ * (11) DMA Resource Leak Detection:
+ *      - Detect potential resource leaks in SG descriptor allocations
+ *        by tracking active allocations and completion status
+ *      - Log any suspected leaks for further analysis
+ *
+ * (12) DMA Error Recovery:
+ *      - Implement recovery mechanism from DMA errors (e.g., reset
+ *        DMA controller and re-initiate transfer)
+ *      - Log recovery actions for further analysis
+ */
+
 /* define the global DMA register instance referenced by dma.h */
 
 /*To measure DMA transfer latency*/
@@ -43,7 +102,6 @@ int sg_allocation_count = 0;
 static struct timespec start_time;
 #endif
 
-
 /*Note: Actual platform need cache flush before DMA transfer on embedded platform*/
 static void dma_cache_flush(void *addr, size_t size)
 {
@@ -72,10 +130,10 @@ static int get_sg_descriptor_index(sg_descriptor *desc)
 {
     if (sg_pool == NULL || desc == NULL)
         return -1;
-    
+
     if (desc < sg_pool || desc >= &sg_pool[SG_DESC_SIZE_POOL])
         return -1;
-    
+
     return (int)(desc - sg_pool);
 }
 
@@ -84,7 +142,7 @@ static int free_sg_descriptors(int start_idx, uint32_t count)
 {
     if (start_idx < 0 || start_idx >= SG_DESC_SIZE_POOL || count == 0 || start_idx + count > SG_DESC_SIZE_POOL)
         return -1;
-    
+
     for (uint32_t i = 0; i < count; i++)
     {
         sg_used_mask &= ~(1u << (start_idx + i));
@@ -161,8 +219,8 @@ static int handle_dma_success(uint8_t state, uint8_t sg_state, log_event_t *even
     event->success_count = success_count;
     event->error_count = error_count;
 
-    //We can take PTP register value and store in log event on actual platform
-    //Generally we dont store all successful transfer but this is just of debugging purpose.
+    // We can take PTP register value and store in log event on actual platform
+    // Generally we dont store all successful transfer but this is just of debugging purpose.
     fw_log_event(event);
     return 0;
 }
@@ -191,7 +249,7 @@ static int handle_dma_error(uint8_t state, uint8_t sg_state, log_event_t *event)
                     sg_descriptor *desc = &sg_allocations[k].start_desc[i];
                     offset += snprintf(error_log + offset, sizeof(error_log) - offset,
                                        " Desc%d: addr=%p src=%llu dst=%llu size=%u",
-                                       i, (void*)desc,
+                                       i, (void *)desc,
                                        (unsigned long long)desc->src_addr,
                                        (unsigned long long)desc->dst_addr,
                                        desc->transfer_size);
@@ -208,7 +266,7 @@ static int handle_dma_error(uint8_t state, uint8_t sg_state, log_event_t *event)
             }
         }
         pthread_mutex_unlock(&sg_mutex);
-        
+
         return DMA_ERR_HW_FAILURE;
     }
     else if (state == DMA_ERROR)
@@ -230,8 +288,8 @@ static int handle_dma_error(uint8_t state, uint8_t sg_state, log_event_t *event)
     event->size = current_size;
     event->success_count = success_count;
     event->error_count = error_count;
-    //We can take PTP register value and store in log event on actual platform
-    //FW logging works on separate thread and it will not affect to actual performance of DMA transfer
+    // We can take PTP register value and store in log event on actual platform
+    // FW logging works on separate thread and it will not affect to actual performance of DMA transfer
     fw_log_event(event);
     return DMA_ERR_HW_FAILURE;
 }
@@ -387,7 +445,7 @@ int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descripto
         /*Cache flush for each descriptor's source data*/
         /*Note I am assuming the descriptor list is allocated from coherent memeory region so avoid frequent cache flush*/
         dma_cache_flush((void *)descriptor_list[i].src_addr,
-                       descriptor_list[i].transfer_size);
+                        descriptor_list[i].transfer_size);
     }
 
     /*Wait for SG DMA to be idle*/
@@ -403,7 +461,7 @@ int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descripto
     pthread_mutex_lock(&sg_mutex);
     for (int k = 0; k < sg_allocation_count; k++)
     {
-        if (sg_allocations[k].start_desc == &descriptor_list[0] && 
+        if (sg_allocations[k].start_desc == &descriptor_list[0] &&
             sg_allocations[k].count == num_descriptors &&
             sg_allocations[k].active == 0)
         {
@@ -435,7 +493,7 @@ int firmware_sg_dma_start(sg_descriptor *descriptor_list, uint32_t num_descripto
     event.transfer_seq = transfer_sequence;
     event.src = descriptor_list[0].src_addr;
     event.dst = descriptor_list[0].dst_addr;
-    event.size = num_descriptors;  /*Number of descriptors*/
+    event.size = num_descriptors; /*Number of descriptors*/
     event.success_count = success_count;
     event.error_count = error_count;
 
@@ -460,14 +518,14 @@ int sg_descriptor_pool_init(void)
         sg_pool[i].next_descriptor = (uint64_t)&sg_pool[(i + 1) % SG_DESC_SIZE_POOL];
     }
     sg_used_mask = 0;
-    
+
     /* Initialize mutex with priority inheritance to prevent priority inversion */
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT);
     pthread_mutex_init(&sg_mutex, &attr);
     pthread_mutexattr_destroy(&attr);
-    
+
     return 0;
 }
 
@@ -500,16 +558,16 @@ int get_free_sg_descriptor(sg_descriptor **desc, uint32_t num_descriptors)
                 sg_used_mask |= (1u << (i + j));
             }
             *desc = &sg_pool[i];
-            
+
             /* Add to allocation tracking list for asynchronous mode */
             if (sg_allocation_count < MAX_SG_ALLOCATIONS)
             {
                 sg_allocations[sg_allocation_count].start_desc = &sg_pool[i];
                 sg_allocations[sg_allocation_count].count = num_descriptors;
-                sg_allocations[sg_allocation_count].active = 0;  /* Not active yet */
+                sg_allocations[sg_allocation_count].active = 0; /* Not active yet */
                 sg_allocation_count++;
             }
-            
+
             pthread_mutex_unlock(&sg_mutex);
             return 0;
         }
